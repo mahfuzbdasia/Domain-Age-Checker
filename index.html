@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domain Age Checker</title>
+<style>
+:root{--bg:#0f172a;--card:#1e293b;--line:#334155;--text:#e2e8f0;--mute:#94a3b8;--accent:#38bdf8;--ok:#22c55e;--bad:#ef4444;--warn:#f59e0b}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text);line-height:1.5}
+.wrap{max-width:1200px;margin:0 auto;padding:24px 16px 60px}
+header{text-align:center;margin-bottom:24px}
+h1{margin:0 0 6px;font-size:clamp(1.5rem,4vw,2.2rem)}
+header p{margin:0;color:var(--mute)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px}
+textarea{width:100%;min-height:130px;resize:vertical;background:#0b1222;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:12px;font:15px/1.5 ui-monospace,Menlo,Consolas,monospace}
+textarea:focus{outline:2px solid var(--accent);border-color:transparent}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;align-items:center}
+button{background:var(--accent);color:#04202e;border:0;border-radius:10px;padding:10px 18px;font-weight:600;font-size:15px;cursor:pointer}
+button.sec{background:transparent;color:var(--text);border:1px solid var(--line)}
+button:disabled{opacity:.5;cursor:not-allowed}
+.hint{color:var(--mute);font-size:13px}
+#progressBox{margin-top:16px;display:none}
+.bar{height:14px;background:#0b1222;border-radius:99px;overflow:hidden;border:1px solid var(--line)}
+.fill{height:100%;width:0;background:linear-gradient(90deg,#0ea5e9,#22c55e);transition:width .25s}
+.pinfo{display:flex;justify-content:space-between;font-size:14px;margin-top:6px;color:var(--mute)}
+.pinfo b{color:var(--text)}
+#results{margin-top:20px;display:none}
+.tw{overflow-x:auto;border:1px solid var(--line);border-radius:12px}
+table{width:100%;border-collapse:collapse;min-width:980px;font-size:14px}
+th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+th{background:#172033;color:var(--mute);font-weight:600;position:sticky;top:0;white-space:nowrap}
+tr:last-child td{border-bottom:0}
+.dom{font-weight:600;color:var(--accent);word-break:break-all}
+.tag{display:inline-block;padding:2px 8px;border-radius:99px;font-size:12px;font-weight:600}
+.t-ok{background:#14532d;color:#86efac}.t-bad{background:#7f1d1d;color:#fca5a5}.t-warn{background:#78350f;color:#fcd34d}
+.na{color:var(--mute);font-style:italic}
+.age{font-weight:600}
+footer{text-align:center;margin-top:36px;color:var(--mute);font-size:14px}
+footer b{color:var(--text)}
+.note{margin-top:12px;font-size:13px;color:var(--mute)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🌐 Domain Age Checker</h1>
+    <p>Check many domains at once — registration date, age, expiry, owner, phone and country.</p>
+  </header>
+
+  <div class="card">
+    <textarea id="input" placeholder="Enter domains, one per line (or separated by comma / space)&#10;example.com&#10;google.com&#10;github.io"></textarea>
+    <div class="row">
+      <button id="go">Check Domains</button>
+      <button id="stop" class="sec" disabled>Stop</button>
+      <button id="csv" class="sec" disabled>Download CSV</button>
+      <button id="clear" class="sec">Clear</button>
+      <span class="hint" id="count"></span>
+    </div>
+    <div id="progressBox">
+      <div class="bar"><div class="fill" id="fill"></div></div>
+      <div class="pinfo"><span id="ptext">Starting…</span><b id="pct">0%</b></div>
+    </div>
+  </div>
+
+  <div id="results">
+    <div class="tw">
+      <table>
+        <thead><tr>
+          <th>#</th><th>Domain</th><th>Status</th><th>Registered (bought)</th><th>Age now</th><th>Expires</th><th>Days left</th><th>Owner name</th><th>Phone</th><th>Country</th><th>Registrar</th>
+        </tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <p class="note">Owner name and phone come from public RDAP/WHOIS data. Most domains hide these with privacy protection (GDPR), so "Hidden" is normal. Some TLDs (like .bd) may not support RDAP and will show "Not found".</p>
+  </div>
+
+  <footer>Admin: <b>Mahfuz</b> · BD, Asia</footer>
+</div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const input = $('input'), go = $('go'), stopBtn = $('stop'), csvBtn = $('csv'), clearBtn = $('clear');
+  const tbody = $('tbody'), results = $('results'), pBox = $('progressBox');
+  const fill = $('fill'), pct = $('pct'), ptext = $('ptext'), countEl = $('count');
+
+  let rows = [], stopFlag = false, bootstrap = null;
+  const CONCURRENCY = 5, TIMEOUT = 15000;
+
+  function parseDomains(text) {
+    const set = new Set();
+    text.split(/[\s,;]+/).forEach(raw => {
+      let d = raw.trim().toLowerCase();
+      if (!d) return;
+      d = d.replace(/^[a-z]+:\/\//, '').split(/[\/?#]/)[0].split('@').pop().split(':')[0].replace(/^www\./, '').replace(/\.$/, '');
+      if (/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(d) || /^xn--/.test(d)) set.add(d);
+    });
+    return [...set];
+  }
+
+  input.addEventListener('input', () => {
+    const n = parseDomains(input.value).length;
+    countEl.textContent = n ? n + ' domain' + (n > 1 ? 's' : '') + ' found' : '';
+  });
+
+  async function fetchJSON(url) {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), TIMEOUT);
+    try {
+      const r = await fetch(url, { signal: ctl.signal, headers: { Accept: 'application/rdap+json, application/json' } });
+      if (r.status === 404) return { notFound: true };
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return await r.json();
+    } finally { clearTimeout(t); }
+  }
+
+  async function loadBootstrap() {
+    if (bootstrap) return bootstrap;
+    try { bootstrap = await fetchJSON('https://data.iana.org/rdap/dns.json'); } catch { bootstrap = { services: [] }; }
+    return bootstrap;
+  }
+
+  function serverFor(domain) {
+    const tld = domain.split('.').pop();
+    for (const [tlds, urls] of (bootstrap.services || [])) {
+      if (tlds.includes(tld)) return urls.find(u => u.startsWith('https')) || urls[0];
+    }
+    return null;
+  }
+
+  async function rdap(domain) {
+    await loadBootstrap();
+    const srv = serverFor(domain);
+    const tries = [];
+    if (srv) tries.push(srv.replace(/\/?$/, '/') + 'domain/' + domain);
+    tries.push('https://rdap.org/domain/' + domain);
+    let lastErr;
+    for (const u of tries) {
+      try {
+        const j = await fetchJSON(u);
+        return j;
+      } catch (e) { lastErr = e; }
+    }
+    throw lastErr || new Error('Lookup failed');
+  }
+
+  function vcardGet(ent, key) {
+    const arr = ent && ent.vcardArray && ent.vcardArray[1];
+    if (!arr) return null;
+    const f = arr.find(x => x[0] === key);
+    return f ? f[3] : null;
+  }
+
+  function findEntity(list, role) {
+    if (!list) return null;
+    for (const e of list) {
+      if ((e.roles || []).includes(role)) return e;
+      const sub = findEntity(e.entities, role);
+      if (sub) return sub;
+    }
+    return null;
+  }
+
+  function clean(v) {
+    if (v == null) return null;
+    if (Array.isArray(v)) v = v.filter(Boolean).pop();
+    v = String(v).trim();
+    if (!v || /redacted|privacy|withheld|not disclosed|data protected/i.test(v)) return null;
+    return v;
+  }
+
+  function parseResult(domain, j) {
+    if (j.notFound) return { domain, status: 'Not found' };
+    const ev = {};
+    (j.events || []).forEach(e => { ev[e.eventAction] = e.eventDate; });
+    const reg = ev['registration'] || null;
+    const exp = ev['expiration'] || null;
+    const registrant = findEntity(j.entities, 'registrant');
+    const registrar = findEntity(j.entities, 'registrar');
+    const adr = registrant && registrant.vcardArray && (registrant.vcardArray[1].find(x => x[0] === 'adr') || [])[3];
+    let country = null;
+    if (Array.isArray(adr)) country = clean(adr[6]);
+    if (!country && registrant && registrant.vcardArray) {
+      const a = registrant.vcardArray[1].find(x => x[0] === 'adr');
+      if (a && a[1] && a[1].cc) country = a[1].cc;
+    }
+    let regName = registrar ? clean(vcardGet(registrar, 'fn')) : null;
+    if (!regName && registrar && registrar.publicIds) regName = null;
+    return {
+      domain, status: 'OK', reg, exp,
+      name: registrant ? (clean(vcardGet(registrant, 'fn')) || clean(vcardGet(registrant, 'org'))) : null,
+      phone: registrant ? clean(vcardGet(registrant, 'tel')) : null,
+      country, registrar: regName,
+      state: (j.status || []).slice(0, 2).join(', ')
+    };
+  }
+
+  function ageText(from) {
+    const a = new Date(from), b = new Date();
+    if (isNaN(a)) return null;
+    let y = b.getFullYear() - a.getFullYear(), m = b.getMonth() - a.getMonth(), d = b.getDate() - a.getDate();
+    if (d < 0) { m--; d += new Date(b.getFullYear(), b.getMonth(), 0).getDate(); }
+    if (m < 0) { y--; m += 12; }
+    if (y < 0) return null;
+    return `${y}y ${m}m ${d}d`;
+  }
+
+  const fmtDate = s => { const d = new Date(s); return isNaN(d) ? '—' : d.toISOString().slice(0, 10); };
+  const na = t => `<span class="na">${t}</span>`;
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  function renderRow(r, i) {
+    const tr = document.createElement('tr');
+    let statusTag, regCell, ageCell, expCell, daysCell;
+    if (r.status === 'OK') {
+      const left = r.exp ? Math.ceil((new Date(r.exp) - new Date()) / 864e5) : null;
+      statusTag = left !== null && left < 0 ? '<span class="tag t-bad">Expired</span>' : left !== null && left < 60 ? '<span class="tag t-warn">Expiring soon</span>' : '<span class="tag t-ok">Registered</span>';
+      regCell = r.reg ? fmtDate(r.reg) : na('Unknown');
+      ageCell = r.reg ? `<span class="age">${ageText(r.reg) || '—'}</span>` : na('Unknown');
+      expCell = r.exp ? fmtDate(r.exp) : na('Unknown');
+      daysCell = left === null ? '—' : (left < 0 ? Math.abs(left) + ' ago' : left);
+    } else {
+      statusTag = r.status === 'Not found' ? '<span class="tag t-warn">Not found</span>' : `<span class="tag t-bad">${esc(r.status)}</span>`;
+      regCell = ageCell = expCell = daysCell = '—';
+    }
+    const ok = r.status === 'OK';
+    tr.innerHTML = `<td>${i + 1}</td><td class="dom">${esc(r.domain)}</td><td>${statusTag}</td><td>${regCell}</td><td>${ageCell}</td><td>${expCell}</td><td>${daysCell}</td>
+      <td>${ok ? (r.name ? esc(r.name) : na('Hidden')) : '—'}</td>
+      <td>${ok ? (r.phone ? esc(r.phone) : na('Hidden')) : '—'}</td>
+      <td>${ok ? (r.country ? esc(r.country) : na('Hidden')) : '—'}</td>
+      <td>${ok ? (r.registrar ? esc(r.registrar) : na('Unknown')) : '—'}</td>`;
+    return tr;
+  }
+
+  async function run() {
+    const list = parseDomains(input.value);
+    if (!list.length) { alert('Please enter at least one valid domain (example: google.com)'); return; }
+    if (list.length > 500) { alert('Max 500 domains at a time.'); return; }
+    rows = new Array(list.length);
+    tbody.innerHTML = '';
+    results.style.display = 'block';
+    pBox.style.display = 'block';
+    go.disabled = true; stopBtn.disabled = false; csvBtn.disabled = true;
+    stopFlag = false;
+    let done = 0, next = 0;
+    const update = (cur) => {
+      const p = Math.round(done / list.length * 100);
+      fill.style.width = p + '%'; pct.textContent = p + '%';
+      ptext.textContent = `Checked ${done} of ${list.length}` + (cur ? ` · ${cur}` : '');
+    };
+    update('loading…');
+
+    // placeholder rows keep order
+    list.forEach((d, i) => { rows[i] = { domain: d, status: 'Checking…' }; tbody.appendChild(renderRow(rows[i], i)); });
+
+    async function worker() {
+      while (!stopFlag) {
+        const i = next++;
+        if (i >= list.length) return;
+        const d = list[i];
+        update(d);
+        let r;
+        try { r = parseResult(d, await rdap(d)); }
+        catch (e) { r = { domain: d, status: e.name === 'AbortError' ? 'Timeout' : 'Lookup failed' }; }
+        rows[i] = r;
+        tbody.replaceChild(renderRow(r, i), tbody.children[i]);
+        done++; update();
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, list.length) }, worker));
+    ptext.textContent = stopFlag ? `Stopped · ${done} of ${list.length} checked` : `Done · ${done} of ${list.length} checked`;
+    if (!stopFlag) { fill.style.width = '100%'; pct.textContent = '100%'; }
+    go.disabled = false; stopBtn.disabled = true; csvBtn.disabled = false;
+  }
+
+  function toCSV() {
+    const head = ['Domain', 'Status', 'Registered', 'Age', 'Expires', 'Owner', 'Phone', 'Country', 'Registrar'];
+    const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+    const lines = [head.map(q).join(',')];
+    rows.forEach(r => {
+      if (!r) return;
+      lines.push([r.domain, r.status, r.reg ? fmtDate(r.reg) : '', r.reg ? ageText(r.reg) : '', r.exp ? fmtDate(r.exp) : '', r.name, r.phone, r.country, r.registrar].map(q).join(','));
+    });
+    const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'domain-age-results.csv';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  go.addEventListener('click', run);
+  stopBtn.addEventListener('click', () => { stopFlag = true; });
+  csvBtn.addEventListener('click', toCSV);
+  clearBtn.addEventListener('click', () => {
+    input.value = ''; tbody.innerHTML = ''; results.style.display = 'none'; pBox.style.display = 'none'; countEl.textContent = ''; csvBtn.disabled = true; rows = [];
+  });
+})();
+</script>
+</body>
+</html>
